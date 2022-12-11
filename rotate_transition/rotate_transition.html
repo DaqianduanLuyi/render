@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>逆时针旋转转场</title>
+</head>
+<body>
+  <canvas width="512" height="512"></canvas>
+  <script>
+    const imageDataContext = new WeakMap();
+
+    const vertex = `
+      attribute vec2 position;
+      attribute vec2 inputTextureCoordinate;
+      attribute vec2 inputTextureCoordinate2;
+
+      varying vec2 textureCoordinate;
+      varying vec2 textureCoordinate2;
+
+      void main()
+      {
+        gl_Position = vec4(position, 1, 1);
+        textureCoordinate = inputTextureCoordinate;
+        textureCoordinate2 = inputTextureCoordinate2;
+      }
+    `;
+
+    const fragment = `
+      #ifdef GL_ES
+      precision mediump float;
+      #endif
+
+      #define PI 3.14159265359
+
+      varying vec2 textureCoordinate;
+      varying vec2 textureCoordinate2;
+
+      uniform sampler2D inputImageTexture;
+      uniform sampler2D inputImageTexture2;
+      
+      uniform float Time;
+      uniform float Duration;
+
+      vec4 getFromColor(vec2 p) {
+        return texture2D(inputImageTexture, p);
+      }
+
+      vec4 getToColor(vec2 p) {
+        return texture2D(inputImageTexture2, p);
+      }
+
+      float easeIn(float t) {
+        return 2.0 * t * t;
+      }
+
+      float easeOut(float t) {
+        return -2.0 * t * t + 2.0 * t + 0.5;
+      }
+
+      float easeInOut(float t) {
+        if (t < 0.5) {
+          return easeIn(t);
+        } else {
+          return easeOut(t - 0.5);
+        }
+      }
+
+      vec2 rotate(float progress) 
+      {
+        if (progress > 1.0) {
+            progress = 1.0;
+        }
+        
+        float phase = progress < 0.5 ? progress * 2.0 : (progress - 0.5) * 2.0;
+        float angleOffset = 0.0;
+        angleOffset = progress < 0.5 ? mix(0.0, -2.0*PI, progress) : mix(2.0*PI, 0.0, progress);
+
+        vec2 p = textureCoordinate.xy - vec2(0.5, 0.5);
+
+        float x = p.x * cos(angleOffset) - sin(angleOffset) * p.y;
+        float y = p.x * sin(angleOffset) + cos(angleOffset) * p.y;
+        
+        return vec2(x + 0.5,y + 0.5);
+      }
+
+      void main()
+      {
+        float progress = mod(Time, Duration) / Duration; // 0~1
+        progress = easeInOut(progress);
+        
+        vec4 color = vec4(0.0);
+        vec4 color1 = vec4(0.0);
+        vec4 color2 = vec4(0.0);
+        float step = 0.0015;
+        if(progress == 0.0) {
+          color = getFromColor(textureCoordinate.xy);
+        } else {
+          for (int i = 0; i < 10; i += 2) {// radial blur
+            float progress1 = progress + step * float(i);
+            float progress2 = progress + step * float(i+1);
+            vec2 p1 = rotate(progress1);
+            vec2 p2 = rotate(progress2);
+            
+            if (progress < 0.5) {
+                color1 = getFromColor(p1);
+                color2 = getFromColor(p2);
+            } else {
+                color1 = getToColor(p1);
+                color2 = getToColor(p2);
+            }
+            
+            color += (color1 + color2) * 0.1;
+          }
+        }
+        
+        gl_FragColor = vec4(color.r, color.g, color.b, 1.0);
+      }
+    `;
+
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl');
+
+    //编译和链接shader
+    const program = compileAndLinkShader(gl, vertex, fragment);
+    gl.useProgram(program);
+
+    //给shader传Time & Duration
+    const duration = 2.0;//单次转场时长
+    let time = 0.0;
+    const uTime = gl.getUniformLocation(program, 'Time');
+    gl.uniform1f(uTime, time);
+    const uDuration = gl.getUniformLocation(program, 'Duration');
+    gl.uniform1f(uDuration, duration);
+
+    //设置顶点坐标和纹理坐标
+    attribVertex(gl);
+    attribTexture(gl);
+
+    (async function () {
+      //加载两张图片，生成两个纹理，写入shader变量中
+      const img1 = await loadImage('../img/img1.png');
+      const imgData1 = getImageData(img1);
+      const texture1 = createTexture(gl, imgData1);
+      setTexture(gl, 0, 'inputImageTexture', texture1);
+
+      const img2 = await loadImage('../img/img2.jpeg');
+      const imgData2 = getImageData(img2);
+      const texture2 = createTexture(gl, imgData2);
+      setTexture(gl, 1, 'inputImageTexture2', texture2);
+
+
+      //绘制
+      drawGridsArrays(gl);
+
+      //转场过程，持续刷新time并重新绘制
+      const timerId = setInterval(() => {
+        time += 0.03;
+        if(time > 6) {//持续6秒
+          time = 6.0;
+          clearInterval(timerId);
+        }
+        gl.uniform1f(uTime, time);
+        drawGridsArrays(gl);
+      }, 30);
+    }());
+    
+    
+    /*
+    下面是WebGL相关的流程实现函数，不同程序过程比较固定，主要是参数差别
+    */
+    function compileAndLinkShader(gl, vertex, fragment) {
+      const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vertexShader, vertex);
+      gl.compileShader(vertexShader);
+
+      const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fragmentShader, fragment);
+      gl.compileShader(fragmentShader);
+
+      const program = gl.createProgram();
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+
+      return program;
+    }
+
+    //设置顶点position
+    function attribVertex(gl) {
+      const points = new Float32Array([
+        -1, -1,
+        -1, 1,
+        1, 1,
+        1, -1,
+      ]);
+
+      const bufferId = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufferId);
+      gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
+
+      const vPosition = gl.getAttribLocation(program, 'position');
+      gl.vertexAttribPointer(vPosition, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(vPosition);
+    }
+
+    //纹理坐标uv
+    function attribTexture(gl) {
+      const points = new Float32Array([
+        0, 0,
+        0, 1,
+        1, 1,
+        1, 0,
+      ]);
+
+      const bufferId = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufferId);
+      gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
+
+      //第一个纹理坐标
+      const vTexture1 = gl.getAttribLocation(program, 'inputTextureCoordinate');
+      gl.vertexAttribPointer(vTexture1, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(vTexture1);
+
+      //第二个纹理坐标
+      const vTexture2 = gl.getAttribLocation(program, 'inputTextureCoordinate2');
+      gl.vertexAttribPointer(vTexture2, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(vTexture2);
+    }
+
+    function loadImage(src) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve) => {
+        img.onload = () => {
+          resolve(img);
+        };
+        img.src = src;
+      });
+    }
+
+    function getImageData(img, rect = [0, 0, img.width, img.height]) {
+      let context;
+      if(imageDataContext.has(img)) context = imageDataContext.get(img);
+      else {
+        const canvas = new OffscreenCanvas(img.width, img.height);
+        context = canvas.getContext('2d');
+        context.drawImage(img, 0, 0);
+        imageDataContext.set(img, context);
+      }
+      return context.getImageData(...rect);
+    }
+
+    function createTexture(gl, img) {
+      // 创建纹理对象
+      const texture = gl.createTexture();
+      
+      // 设置预处理函数，由于图片坐标系和WebGL坐标的Y轴是反的，这个设置可以将图片Y坐标翻转一下
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      
+      // 将纹理绑定到当前上下文
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      
+      // 指定纹理图像
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      
+      // 设置纹理的一些参数
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+      return texture;
+    }
+
+    function setTexture(gl, idx, tMap, texture) {
+      // 激活纹理单元
+      gl.activeTexture(gl.TEXTURE1 + idx);
+      // 绑定纹理
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      // 获取shader中纹理变量
+      const loc = gl.getUniformLocation(program, tMap);
+      // 将对应的纹理单元写入shader变量
+      gl.uniform1i(loc, idx);
+      // 解除纹理绑定
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    //
+    function drawGridsArrays(gl) {
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    }
+  </script>
+</body>
+</html>
